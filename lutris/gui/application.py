@@ -28,8 +28,6 @@ from typing import List, Optional
 
 import gi
 
-from ..util.busy import BusyAsyncCall
-
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 
@@ -53,13 +51,15 @@ from lutris.runners import InvalidRunnerError, RunnerInstallationError, get_runn
 from lutris.services import get_enabled_services
 from lutris.startup import init_lutris, run_all_checks
 from lutris.style_manager import StyleManager
-from lutris.util import datapath, log, system
+from lutris.util import datapath, log, resources, system
 from lutris.util.http import HTTPError, Request
 from lutris.util.log import file_handler, logger
 from lutris.util.savesync import save_check, show_save_stats, upload_save
 from lutris.util.steam.appmanifest import AppManifest, get_appmanifests
 from lutris.util.steam.config import get_steamapps_dirs
 
+from ..util.busy import BusyAsyncCall
+from ..util.standalone_scripts import generate_script
 from .lutriswindow import LutrisWindow
 
 LUTRIS_EXPERIMENTAL_FEATURES_ENABLED = os.environ.get("LUTRIS_EXPERIMENTAL_FEATURES_ENABLED") == "1"
@@ -429,19 +429,6 @@ class LutrisApplication(Gtk.Application):
         # Workaround broken pygobject bindings
         command_line.do_print_literal(command_line, string + "\n")
 
-    def generate_script(self, db_game, script_path):
-        """Output a script to a file.
-        The script is capable of launching a game without the client
-        """
-
-        def on_error(error: BaseException) -> None:
-            logger.exception("Unable to generate script: %s", error)
-
-        game = Game(db_game["id"])
-        game.game_error.register(on_error)
-        game.reload_config()
-        game.write_script(script_path, self.launch_ui_delegate)
-
     def do_handle_local_options(self, options):
         # Text only commands
 
@@ -485,6 +472,23 @@ class LutrisApplication(Gtk.Application):
             dest_dir = options.lookup_value("dest").get_string()
         else:
             dest_dir = None
+
+        if options.contains("output-script"):
+            searchstring = options.lookup_value("output-script").get_string()
+            export_script_game = (
+                games_db.get_game_by_field(searchstring, "id")
+                or games_db.get_game_by_field(searchstring, "slug")
+                or games_db.get_game_by_field(searchstring, "installer_slug")
+            )
+
+            if not export_script_game or not export_script_game["id"]:
+                logger.warning(
+                    "No valid game (%s) provided to generate the script. Use the -l option to find suitable games!",
+                    searchstring,
+                )
+                return 1
+            generate_script(logger, self.launch_ui_delegate, export_script_game, f"{export_script_game['slug']}.sh")
+            return 0
 
         # List game
         if options.contains("list-games"):
@@ -636,9 +640,6 @@ class LutrisApplication(Gtk.Application):
 
         self.launch_ui_delegate = CommandLineUIDelegate(launch_config_name)
 
-        if options.contains("output-script"):
-            action = "write-script"
-
         revision = installer_info["revision"]
 
         installer_file = None
@@ -699,13 +700,6 @@ class LutrisApplication(Gtk.Application):
         if options.contains("reinstall"):
             action = "install"
 
-        if action == "write-script":
-            if not db_game or not db_game["id"]:
-                logger.warning("No game provided to generate the script")
-                return 1
-            self.generate_script(db_game, options.lookup_value("output-script").get_string())
-            return 0
-
         # Graphical commands
         self.set_tray_icon()
         self.activate()
@@ -761,6 +755,15 @@ class LutrisApplication(Gtk.Application):
 
             if game.state == game.STATE_STOPPED and not self.window.is_visible():
                 self.quit()
+
+            if self.quit_on_game_exit:
+
+                def game_stop_signal_handler(signum, _frame):
+                    logger.debug("signal handler called with signal: %d", signum)
+                    game.stop()
+
+                signal.signal(signal.SIGTERM, game_stop_signal_handler)
+                signal.signal(signal.SIGINT, game_stop_signal_handler)
         elif self.window:
             # If we're showing the window, it will handle the delegated UI
             # from here on out, no matter what command line we got.
@@ -875,8 +878,16 @@ class LutrisApplication(Gtk.Application):
             )
 
     def print_game_json(self, command_line, game_list):
-        games = [
-            {
+        games = []
+
+        for game in game_list:
+            playtime = timedelta(hours=game["playtime"]) if game["playtime"] else None
+            cover_path = resources.get_cover_path(game["slug"]) if game["slug"] else None
+
+            if cover_path and not os.path.exists(cover_path):
+                cover_path = None
+
+            game_obj = {
                 "id": game["id"],
                 "slug": game["slug"],
                 "name": game["name"],
@@ -884,11 +895,14 @@ class LutrisApplication(Gtk.Application):
                 "platform": game["platform"] or None,
                 "year": game["year"] or None,
                 "directory": game["directory"] or None,
-                "playtime": (str(timedelta(hours=game["playtime"])) if game["playtime"] else None),
+                "playtime": str(playtime) if playtime else None,
+                "playtimeSeconds": playtime.total_seconds() if playtime else None,
                 "lastplayed": (str(datetime.fromtimestamp(game["lastplayed"])) if game["lastplayed"] else None),
+                "coverPath": cover_path,
             }
-            for game in game_list
-        ]
+
+            games.append(game_obj)
+
         self._print(command_line, json.dumps(games, indent=2))
 
     def print_service_game_list(self, command_line, game_list):
