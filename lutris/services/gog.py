@@ -86,8 +86,8 @@ class GOGService(OnlineService):
     embed_url = "https://embed.gog.com"
     api_url = "https://api.gog.com"
 
-    client_id = "46899977096215655"
-    client_secret = "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9"
+    client_id = ""
+    client_secret = ""
     redirect_uris = ["https://embed.gog.com/on_login_success?origin=client"]
 
     login_success_url = "https://www.gog.com/on_login_success"
